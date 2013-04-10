@@ -2,7 +2,7 @@
 
 enum command_type
   {
-    AND_COMMAND,         // A && B
+    AND_COMMAND = 1,     // A && B
     SEQUENCE_COMMAND,    // A ; B
     OR_COMMAND,          // A || B
     PIPE_COMMAND,        // A | B

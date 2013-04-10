@@ -8,15 +8,6 @@
 #include <stdio.h>
 #include <error.h>
 
-char last_token = '\0'; //Keeps track of the last important character pulled from the stream
-char last_char = '\0';
-
-/* FIXME: You may need to add #include directives, macro definitions,
-   static function definitions, etc.  */
-
-/* FIXME: Define the type 'struct command_stream' here.  This should
-   complete the incomplete type declaration in command.h.  */
-
 struct command_stream
 {
   command_t* commands;
@@ -28,18 +19,26 @@ bool is_valid_word_char(char c);
 
 command_t get_next_command(int (*get_next_byte) (void *), void *get_next_byte_argument, int *line_num);
 
-void build_command(int (*get_next_byte) (void *), void *get_next_byte_argument, command_t token);
+void build_command(int (*get_next_byte) (void *), void *get_next_byte_argument, command_t token, int *line_num);
 
-command_t search_tree (command_t head);
+command_stream_t build_command_stream(int (*get_next_byte) (void *), void *get_next_byte_argument, bool in_subshell);
 
 command_stream_t
 make_command_stream (int (*get_next_byte) (void *),
 		     void *get_next_byte_argument)
 {
+  return build_command_stream(get_next_byte, get_next_byte_argument, 0);
+}
+
+command_stream_t
+build_command_stream(int (*get_next_byte) (void *),
+         void *get_next_byte_argument, bool in_subshell)
+{
   command_t curr_command, next_command, command_tree;
   int commands_size = 10;
   int command_index = 0;
   int line_num = 1;
+  char last_char = '\0';
   command_stream_t stream = (command_stream_t) checked_malloc(sizeof(struct command_stream));
   stream->commands = (command_t*) checked_malloc(commands_size*sizeof(command_t));
   stream->index = 0;
@@ -178,6 +177,7 @@ get_next_command(int (*get_next_byte) (void *),
          void *get_next_byte_argument, int* line_num)
 {
   char c;
+  static num command_type last_token = 0;
   command_t token = (command_t) checked_malloc(sizeof(struct command));
 
   //Searches for next command
@@ -210,10 +210,7 @@ get_next_command(int (*get_next_byte) (void *),
     {
       *line_num++;
 
-      if (last_token =='<' || last_token == '>')
-        error(1, 0, "%d: Newlines cannot be preceded by redirects", *line_num);
-
-      else if (is_valid_word_char(last_token) || last_token == '(' || last_token == ')')
+      else if (last_token == SIMPLE_COMMAND || last_token == SUBSHELL_COMMAND)
         break;
 
       else
@@ -240,18 +237,13 @@ get_next_command(int (*get_next_byte) (void *),
   switch (c)
   {
     case '&':
-
-      if (last_token == '\n')
-      {
-        error(1, 0, "%d: Missing left operand", *line_num);
-      }
-
-      last_token = c;
-      last_char = c;
-      c = get_next_byte(get_next_byte_argument);
  
       if (c != '&')
         error(1,0, "%d: Invalid operator", *line_num);
+
+      last_token = AND_COMMAND;
+      last_char = c;
+      c = get_next_byte(get_next_byte_argument);
 
       token->type = AND_COMMAND;
       token->u.command[0] = NULL;
@@ -259,24 +251,23 @@ get_next_command(int (*get_next_byte) (void *),
       break;
 
     case '|': 
-      if (last_token == '\n')
-      {
-        error(1, 0, "%d: Missing left operand", *line_num);
-      }
 
-      last_token = c;
       last_char = c;
       c = get_next_byte(get_next_byte_argument);
 
       if (c != '|')
       {
         token->type = PIPE_COMMAND;
+        last_token = PIPE_COMMAND
         last_char = '|';
         ungetc(c, get_next_byte_argument);
       }
 
       else
+      {
         token->type = OR_COMMAND;
+        last_token = OR_COMMAND;
+      }
 
       token->u.command[0] = NULL;
       token->u.command[1] = NULL;
@@ -284,12 +275,8 @@ get_next_command(int (*get_next_byte) (void *),
 
     case '\n':
     case ';':
-      if (last_token == '\n')
-      {
-        error(1, 0, "%d: Missing left operand", *line_num);
-      }
 
-      last_token = c;
+      last_token = SEQUENCE_COMMAND;
       token->type = SEQUENCE_COMMAND;
       token->u.command[0] = NULL;
       token->u.command[1] = NULL;
@@ -297,19 +284,19 @@ get_next_command(int (*get_next_byte) (void *),
 
     case '(':
     case ')':
-      last_token = c;
+      last_token = SUBSHELL_COMMAND;
       token->type = SUBSHELL_COMMAND;
       break;
 
     default:
-      last_token = c;
+      last_token = SIMPLE_COMMAND;
       token->type = SIMPLE_COMMAND;
       ungetc(c, get_next_byte_argument);
       break;
   }
 
   if (token->type == SIMPLE_COMMAND || token->type == SUBSHELL_COMMAND)
-    build_command(get_next_byte, get_next_byte_argument, token);
+    build_command(get_next_byte, get_next_byte_argument, token, line_num);
 
   token->status = -1;
 
@@ -451,7 +438,6 @@ build_command(int (*get_next_byte) (void *), void *get_next_byte_argument, comma
       {
         buf[buf_index] = c;
         buf_index++;
-        last_token = c;
 
         if (c == '<')
           inputs_seen++;
@@ -489,15 +475,10 @@ build_command(int (*get_next_byte) (void *), void *get_next_byte_argument, comma
   token->input = NULL;
   token->output = NULL;
 
-  if (buf_index == 1)
-    error(1,0, "%d: Redirect is missing argument", *line_num);
-
   else
   {
     char* in_pos = strchr(buf, '<');
     char* out_pos = strchr(buf, '>');
-    char* end_pos = strchr(buf, '\0');
-    int len;
 
     if (in_pos && out_pos)
     {
