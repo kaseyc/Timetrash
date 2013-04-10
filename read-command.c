@@ -15,6 +15,8 @@ struct command_stream
   int index;
 };
 
+char last_char = '\0';
+
 bool is_valid_word_char(char c);
 
 command_t get_next_command(int (*get_next_byte) (void *), void *get_next_byte_argument, int *line_num);
@@ -34,16 +36,15 @@ command_stream_t
 build_command_stream(int (*get_next_byte) (void *),
          void *get_next_byte_argument, bool in_subshell)
 {
-  command_t curr_command, next_command, command_tree;
+  command_t curr_command, next_command, command_tree, last_operator;
   int commands_size = 10;
   int command_index = 0;
   int line_num = 1;
-  char last_char = '\0';
   command_stream_t stream = (command_stream_t) checked_malloc(sizeof(struct command_stream));
   stream->commands = (command_t*) checked_malloc(commands_size*sizeof(command_t));
   stream->index = 0;
 
-  curr_command = get_next_command(get_next_byte, get_next_byte_argument);
+  curr_command = get_next_command(get_next_byte, get_next_byte_argument, &line_num);
   if (curr_command->type != SIMPLE_COMMAND && curr_command->type != SUBSHELL_COMMAND)
     error(1, 0, "%d: Missing left operand", line_num);
 
@@ -77,14 +78,24 @@ build_command_stream(int (*get_next_byte) (void *),
         if (curr_command->type != SIMPLE_COMMAND && curr_command->type != SUBSHELL_COMMAND)
           error(1,0, "%d: Missing left operand", line_num);
 
-        stream->commands[command_index] = command_tree;
-        command_index++;
-        command_tree = NULL;
-
-        if (command_index == commands_size)
+        if (in_subshell)
         {
-          commands_size += 25;
-          stream->commands = (command_t *) checked_realloc(stream->commands, commands_size*sizeof(command_t));
+          next_command->u.command[0] = command_tree;
+          command_tree = next_command;
+          last_operator = next_command;
+        }
+
+        else
+        {
+          stream->commands[command_index] = command_tree;
+          command_index++;
+          command_tree = NULL;
+
+          if (command_index == commands_size)
+          {
+            commands_size += 25;
+            stream->commands = (command_t *) checked_realloc(stream->commands, commands_size*sizeof(command_t));
+          }
         }
         break;
 
@@ -93,8 +104,28 @@ build_command_stream(int (*get_next_byte) (void *),
         if (curr_command->type != SIMPLE_COMMAND && curr_command->type != SUBSHELL_COMMAND)
           error(1,0, "%d: Missing left operand", line_num);
 
+        if (in_subshell)
+        {
+          last_operator = next_command;
+
+          if (command_tree->type != SEQUENCE_COMMAND)
+          {
+            next_command->u.command[0] = command_tree;
+            command_tree = next_command;
+          }
+
+          else
+          {
+            next_command->u.command[0] = command_tree->u.command[1];
+            command_tree->u.command[1] = next_command;
+          }
+        }
+
+        else
+        {
           next_command->u.command[0] = command_tree;
           command_tree = next_command;
+        }
         break;
 
       case PIPE_COMMAND:
@@ -102,31 +133,38 @@ build_command_stream(int (*get_next_byte) (void *),
         if (curr_command->type != SIMPLE_COMMAND && curr_command->type != SUBSHELL_COMMAND)
           error(1,0, "%d: Missing left operand", line_num);
 
-        if (command_tree->type == PIPE_COMMAND || command_tree->type == SUBSHELL_COMMAND || command_tree->type == SIMPLE_COMMAND)
+        if (in_subshell)
         {
-          next_command->u.command[0] = command_tree;
-          command_tree = next_command;
+          if(command_tree->type == PIPE_COMMAND || command_tree->type == SUBSHELL_COMMAND || command_tree->type == SIMPLE_COMMAND)
+          {
+            next_command->u.command[0] = command_tree;
+            command_tree = next_command;
+          }
+
+          else
+          {
+            next_command->u.command[0] = last_operator->u.command[1];
+            last_operator->u.command[1] = next_command;
+          }
         }
 
         else
         {
-          next_command->u.command[0] = command_tree->u.command[1];
-          command_tree->u.command[1] = next_command;
+          if (command_tree->type == PIPE_COMMAND || command_tree->type == SUBSHELL_COMMAND || command_tree->type == SIMPLE_COMMAND)
+          {
+            next_command->u.command[0] = command_tree;
+            command_tree = next_command;
+          }
+
+          else
+          {
+            next_command->u.command[0] = command_tree->u.command[1];
+            command_tree->u.command[1] = next_command;
+          }
         }
         break;
 
       case SIMPLE_COMMAND:
-        if (curr_command->type == SIMPLE_COMMAND || curr_command->type == SUBSHELL_COMMAND)
-          error(1,0, "%d: Missing operator", line_num);
-
-        else if (command_tree == NULL)
-          command_tree = next_command;
-
-        else
-          curr_command->u.command[1] = next_command;
-
-        break;
-
       case SUBSHELL_COMMAND:
         if (curr_command->type == SIMPLE_COMMAND || curr_command->type == SUBSHELL_COMMAND)
           error(1,0, "%d: Missing operator", line_num);
@@ -135,9 +173,7 @@ build_command_stream(int (*get_next_byte) (void *),
           command_tree = next_command;
 
         else
-        {
-          curr_command->u.command[1] = next_command->u.subshell_command;
-        }
+          curr_command->u.command[1] = next_command;
         break;
     }
 
@@ -177,7 +213,7 @@ get_next_command(int (*get_next_byte) (void *),
          void *get_next_byte_argument, int* line_num)
 {
   char c;
-  static num command_type last_token = 0;
+  static enum command_type last_token = SEQUENCE_COMMAND;
   command_t token = (command_t) checked_malloc(sizeof(struct command));
 
   //Searches for next command
@@ -208,9 +244,9 @@ get_next_command(int (*get_next_byte) (void *),
 
     else if (c == '\n')
     {
-      *line_num++;
+      *line_num += 1;
 
-      else if (last_token == SIMPLE_COMMAND || last_token == SUBSHELL_COMMAND)
+      if (last_token == SIMPLE_COMMAND || last_token == SUBSHELL_COMMAND)
         break;
 
       else
@@ -258,7 +294,7 @@ get_next_command(int (*get_next_byte) (void *),
       if (c != '|')
       {
         token->type = PIPE_COMMAND;
-        last_token = PIPE_COMMAND
+        last_token = PIPE_COMMAND;
         last_char = '|';
         ungetc(c, get_next_byte_argument);
       }
@@ -308,18 +344,19 @@ get_next_command(int (*get_next_byte) (void *),
 void
 build_command(int (*get_next_byte) (void *), void *get_next_byte_argument, command_t token, int* line_num)
 {
-  int buf_size = 100;
+  int buf_size = 100, buf2_size = 50;
   int words_size = 4;
-  int buf_index = 0, words_index = 0;
+  int buf_index = 0, buf2_index = 0, words_index = 0;
   int nesting_level = 1;
-  int inputs_seen = 0, outputs_seen = 0;
+  int input_chars = 0, output_chars = 0;
   size_t size;
   char *buf = (char*) checked_malloc(buf_size);
-  char* buf2;
+  char *buf2;
   char **words = (char**) checked_malloc(words_size * sizeof(char*));
-  command_stream_t subshell_tree;
   char *special_chars = "&|()#;\n";
+  char *in_pos, *out_pos, *i;
   char c;
+  command_stream_t subshell_tree;
 
   switch (token->type)
   {
@@ -399,6 +436,7 @@ build_command(int (*get_next_byte) (void *), void *get_next_byte_argument, comma
             nesting_level--;
             if (nesting_level == 0)
             {
+              c = get_next_byte(get_next_byte_argument);
               break;
             }
           }
@@ -419,7 +457,7 @@ build_command(int (*get_next_byte) (void *), void *get_next_byte_argument, comma
       //Makes a recursive call to make_command_stream to generate the
       //command tree for the subshell
       FILE *subshell_stream = fmemopen(buf, buf_index, "r");
-      subshell_tree = make_command_stream(get_next_byte, subshell_stream);
+      subshell_tree = build_command_stream(get_next_byte, subshell_stream, 1);
       token->u.subshell_command = subshell_tree->commands[0];
       break;
 
@@ -436,29 +474,32 @@ build_command(int (*get_next_byte) (void *), void *get_next_byte_argument, comma
     {
       if (is_valid_word_char(c) || c =='<' || c == '>')
       {
+
+        if (c == '<')
+          input_chars++;
+
+        if (c == '>')
+          output_chars++;
+
+        if (input_chars > 1 || output_chars > 1)
+          error(1, 0, "%d: Invalid redirect", *line_num);
+
         buf[buf_index] = c;
         buf_index++;
 
-        if (c == '<')
-          inputs_seen++;
-
-        if (c == '>')
-          outputs_seen++;
-
-        if (inputs_seen > 1 || outputs_seen > 1)
-          error(1, 0, "%d: Invalid character in redirect", *line_num);
-
         if (buf_index == buf_size - 1)
         {
-          buf_size += 500;
-          buf = (char*) checked_realloc(buf, buf_size);
+          buf_size *= 2;
+          size = buf_size;
+          buf = (char*) checked_grow_alloc(buf, &size);
+          buf_size = size;
         }
       }
 
-    else if (c != ' ' && c != '\t')
+      else if (c != ' ' && c != '\t')
       //Returns an error is there is a non-whitespace character 
       //that is not a redirect or valid word character.
-      error(1,0, "%d: Invalid Character", *line_num);
+        error(1,0, "%d: Invalid Character", *line_num);
 
       last_char = c;
       c = get_next_byte(get_next_byte_argument);
@@ -466,7 +507,8 @@ build_command(int (*get_next_byte) (void *), void *get_next_byte_argument, comma
 
     else
     {
-      buf[buf_index] - '\0';
+      buf[buf_index] = '\0';
+      buf_index++;
       ungetc(c, get_next_byte_argument);
       break;
     }
@@ -475,35 +517,68 @@ build_command(int (*get_next_byte) (void *), void *get_next_byte_argument, comma
   token->input = NULL;
   token->output = NULL;
 
+  if (buf_index == 2)
+    error (1, 0, "%d: Invalid redirect", *line_num);
+
   else
   {
-    char* in_pos = strchr(buf, '<');
-    char* out_pos = strchr(buf, '>');
+    in_pos = strchr(buf, '<');
+    out_pos = strchr(buf, '>');
 
     if (in_pos && out_pos)
     {
       if (out_pos < in_pos)
         error(1,0, "%d: Output must come after input", *line_num);
 
-      buf2 = checked_malloc(out_pos - in_pos);
+      buf2 = checked_malloc(buf2_size);
+      for (i = in_pos+1; i != out_pos; i++)
+      {
+        if (*i == '<')
+          error (1, 0, "Invalid Redirect", *line_num);
 
-      strncpy(buf2, in_pos+1, out_pos - in_pos-1);
+        buf2[buf2_index] = *i;
+        buf2_index++;
+
+        if (buf2_index == buf2_size-1)
+        {
+          buf2_size *= 2;
+          size = buf2_size;
+          buf = (char*) checked_grow_alloc(buf, &size);
+          buf2_size = size;
+        }
+      }
+
+      buf2[buf2_index] = '\0';
+
       token->input = buf2;
-      
-      if (strlen(token->input) == 0)
+
+      buf2_size = 25;
+      buf2_index = 0;
+      buf2 = checked_malloc(buf2_size);
+
+      for (i = out_pos+1; *i != '\0'; i++)
+      {
+        if (*i == '<' || *i)
+
+        buf2[buf2_index] = *i;
+        buf2_index++;
+
+        if (buf2_index == buf2_size-1)
+        {
+          buf2_size *= 2;
+          size = buf2_size;
+          buf = (char*) checked_grow_alloc(buf, &size);
+          buf2_size = size;
+        }
+      }
+
+      buf2[buf2_index] = '\0';
+      if (buf2[0] == '\0')
         error(1,0, "%d: Redirect is missing argument", *line_num);
 
-
-      buf2 = checked_malloc(end_pos - out_pos);
-
-      strncpy(buf2, out_pos+1, end_pos - out_pos);
       token ->output = buf2;
+    }
 
-      if (strlen(token->output) == 0)
-        error(1,0, "%d: Redirect is missing argument", *line_num);
-
-
-    //}
 
     else if (in_pos)
       token->input = strtok(buf, "<");
