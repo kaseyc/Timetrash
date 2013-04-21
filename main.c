@@ -6,6 +6,7 @@
 #include <stdio.h>
 
 #include "command.h"
+#include "alloc.h"
 
 static char const *program_name;
 static char const *script_name;
@@ -19,7 +20,12 @@ usage (void)
 static int
 get_next_byte (void *stream)
 {
-  return getc (stream);
+  int val = getc (stream);
+
+  if (ferror(stream))
+    error(1, errno, "Error reading stream");
+
+  return val;
 }
 
 int
@@ -67,5 +73,6 @@ main (int argc, char **argv)
 	}
     }
 
+  free_stream(command_stream);
   return print_tree || !last_command ? 0 : command_status (last_command);
 }

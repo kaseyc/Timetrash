@@ -4,26 +4,24 @@
 #include "command-internals.h"
 #include "alloc.h"
 #include <string.h>
+#include <stdlib.h>
 #include <ctype.h>
 #include <stdio.h>
+#include <errno.h>
 #include <error.h>
 
-struct command_stream
-{
-  command_t* commands;
-  int num_commands;
-  int index;
-};
-
 char last_char = '\0';
+char* error_message = '\0';
 
 bool is_valid_word_char(char c);
 
 command_t get_next_command(int (*get_next_byte) (void *), void *get_next_byte_argument, int *line_num);
 
-void build_command(int (*get_next_byte) (void *), void *get_next_byte_argument, command_t token, int *line_num);
+void build_command(int (*get_next_byte) (void *), void *get_next_byte_argument, command_t token);
 
 command_stream_t build_command_stream(int (*get_next_byte) (void *), void *get_next_byte_argument, bool in_subshell);
+
+void error_func(command_stream_t stream, command_t current_command, char* message, int line);
 
 command_stream_t
 make_command_stream (int (*get_next_byte) (void *),
@@ -35,24 +33,32 @@ make_command_stream (int (*get_next_byte) (void *),
 command_stream_t
 build_command_stream(int (*get_next_byte) (void *),
          void *get_next_byte_argument, bool in_subshell)
+/* This function reads in commands one by one, and builds parse trees.
+   The boolean argument allows the function to modify it's behavior if it
+   is evalutating a subshell, allowing the commands to be built recursively */
 {
   command_t curr_command, next_command, command_tree, last_operator;
   int commands_size = 10;
-  int command_index = 0;
   int line_num = 1;
+  size_t size;
   command_stream_t stream = (command_stream_t) checked_malloc(sizeof(struct command_stream));
   stream->commands = (command_t*) checked_malloc(commands_size*sizeof(command_t));
+  stream->num_commands = 0;
   stream->index = 0;
 
   curr_command = get_next_command(get_next_byte, get_next_byte_argument, &line_num);
+
+  if (curr_command->status == 1)
+    //A value of 1 means an error occurred
+    error_func(stream, curr_command, error_message, line_num);
+
   if (curr_command->type != SIMPLE_COMMAND && curr_command->type != SUBSHELL_COMMAND)
-    error(1, 0, "%d: Missing left operand", line_num);
+    error_func(stream, curr_command, "Missing left operand", line_num);
 
   command_tree = curr_command;
 
   for(;;)
   {
-    //Get commands and build the parse tree
     next_command = get_next_command(get_next_byte, get_next_byte_argument, &line_num);
 
     //A return value of NULL means EOF was found.
@@ -60,23 +66,29 @@ build_command_stream(int (*get_next_byte) (void *),
     if (next_command == NULL)
     {
       if (curr_command->type != SIMPLE_COMMAND && curr_command->type != SUBSHELL_COMMAND && curr_command->type != SEQUENCE_COMMAND)
-        error(1,0, "%d: Missing right operand", line_num);
+        error_func(stream, curr_command, "Missing operator", line_num);
 
       if (command_tree != NULL)
       {
-        stream->commands[command_index] = command_tree;
-        command_index++;
-        stream->num_commands = command_index;
+        stream->commands[stream->num_commands] = command_tree;
+        stream->num_commands++;
       }
 
       break;
     }
 
+    /* Builds the parse tree based on current token, and the next one we find
+       Each element is added to the tree as it is found, and the tree grows in an
+       upward-rightward direction
+
+       Becuase we know that last operator that has not had it's right side filled,
+       higher precedence operators can be added without backtracking using pointer swaps */
+
     switch(next_command->type)
     {
       case SEQUENCE_COMMAND:
         if (curr_command->type != SIMPLE_COMMAND && curr_command->type != SUBSHELL_COMMAND)
-          error(1,0, "%d: Missing left operand", line_num);
+          error_func(stream, curr_command, "Missing operand", line_num);
 
         if (in_subshell)
         {
@@ -87,14 +99,16 @@ build_command_stream(int (*get_next_byte) (void *),
 
         else
         {
-          stream->commands[command_index] = command_tree;
-          command_index++;
+          stream->commands[stream->num_commands] = command_tree;
+          stream->num_commands++;
           command_tree = NULL;
 
-          if (command_index == commands_size)
+          if (stream->num_commands == commands_size)
           {
-            commands_size += 25;
-            stream->commands = (command_t *) checked_realloc(stream->commands, commands_size*sizeof(command_t));
+            commands_size *= 2;
+            size = commands_size*sizeof(command_t);
+            stream->commands = (command_t *) checked_grow_alloc(stream->commands, &size);
+            commands_size = size/sizeof(command_t);
           }
         }
         break;
@@ -102,7 +116,7 @@ build_command_stream(int (*get_next_byte) (void *),
       case AND_COMMAND:
       case OR_COMMAND:
         if (curr_command->type != SIMPLE_COMMAND && curr_command->type != SUBSHELL_COMMAND)
-          error(1,0, "%d: Missing left operand", line_num);
+          error_func(stream, curr_command, "Missing operand", line_num);
 
         if (in_subshell)
         {
@@ -131,7 +145,7 @@ build_command_stream(int (*get_next_byte) (void *),
       case PIPE_COMMAND:
 
         if (curr_command->type != SIMPLE_COMMAND && curr_command->type != SUBSHELL_COMMAND)
-          error(1,0, "%d: Missing left operand", line_num);
+          error_func(stream, curr_command, "Missing operand", line_num);
 
         if (in_subshell)
         {
@@ -167,7 +181,7 @@ build_command_stream(int (*get_next_byte) (void *),
       case SIMPLE_COMMAND:
       case SUBSHELL_COMMAND:
         if (curr_command->type == SIMPLE_COMMAND || curr_command->type == SUBSHELL_COMMAND)
-          error(1,0, "%d: Missing operator", line_num);
+          error_func(stream, curr_command, "Missing operator", line_num);
 
         else if (command_tree == NULL)
           command_tree = next_command;
@@ -180,16 +194,16 @@ build_command_stream(int (*get_next_byte) (void *),
     curr_command = next_command;
   }
 
-  stream->num_commands = command_index;
   return stream;
 }
 
+/* Returns the next command from the stream, or NULL is the end is reached */
 command_t
 read_command_stream (command_stream_t s)
 {
   command_t val;
 
-  if (s->index >= s->num_commands)
+  if (s == NULL || (s->index >= s->num_commands))
     return NULL;
 
   val = s->commands[s->index];
@@ -208,6 +222,8 @@ is_valid_word_char(char c)
   return (isascii(c) && (isalnum(c) || strchr(acceptable_chars, c)));
 }
 
+/* Loops through the stream ignoring trivial whitespace until it finds the
+   next command. Returns a pointer to the command, or NULL if EOF is found. */
 command_t 
 get_next_command(int (*get_next_byte) (void *),
          void *get_next_byte_argument, int* line_num)
@@ -215,6 +231,7 @@ get_next_command(int (*get_next_byte) (void *),
   char c;
   static enum command_type last_token = SEQUENCE_COMMAND;
   command_t token = (command_t) checked_malloc(sizeof(struct command));
+  token->status = -1;
 
   //Searches for next command
   for(;;)
@@ -226,12 +243,20 @@ get_next_command(int (*get_next_byte) (void *),
 
     else if (c == '<' || c == '>')
       //Redirects cannot exist on their own
-      error(1,0, "%d: Invalid redirect", *line_num);
+    {
+      error_message = "Missing operand";
+      token->status = 1;
+      return token;
+    }
 
     else if (c == '#')
     {
       if ( last_char != '\0' && (is_valid_word_char(last_char) || strchr("&|();", last_char)))
-        error(1, 0, "%d: Invalid character", *line_num);
+      {
+      error_message = "Invalid character";
+      token->status = 1;
+      return token;
+      }
 
       while (c != '\n')
       {
@@ -243,6 +268,7 @@ get_next_command(int (*get_next_byte) (void *),
     }
 
     else if (c == '\n')
+      //Checks if the newline is significant or not
     {
       *line_num += 1;
 
@@ -275,7 +301,11 @@ get_next_command(int (*get_next_byte) (void *),
     case '&':
  
       if (c != '&')
-        error(1,0, "%d: Invalid operator", *line_num);
+      {
+      error_message = "Invalid operator";
+      token->status = 1;
+      return token;
+      }
 
       last_token = AND_COMMAND;
       last_char = c;
@@ -332,17 +362,16 @@ get_next_command(int (*get_next_byte) (void *),
   }
 
   if (token->type == SIMPLE_COMMAND || token->type == SUBSHELL_COMMAND)
-    build_command(get_next_byte, get_next_byte_argument, token, line_num);
-
-  token->status = -1;
+    build_command(get_next_byte, get_next_byte_argument, token);
 
   return token;
 }
 
 /* Parses redirects for simple commands and subshells
-   and creates the word array for simple commands */ 
+   and creates the word array for simple commands 
+   Subshells are built recurcively using build_command_stream */ 
 void
-build_command(int (*get_next_byte) (void *), void *get_next_byte_argument, command_t token, int* line_num)
+build_command(int (*get_next_byte) (void *), void *get_next_byte_argument, command_t token)
 {
   int buf_size = 100, buf2_size = 50;
   int words_size = 4;
@@ -412,7 +441,14 @@ build_command(int (*get_next_byte) (void *), void *get_next_byte_argument, comma
         }
 
         else
-          error(1,0, "%d: Invalid Character", *line_num);
+        {
+          error_message = "Invalid character";
+          token->status = 1;
+          free(buf);
+          token->u.word = words;
+
+          return;
+        }
       }
 
 
@@ -420,11 +456,17 @@ build_command(int (*get_next_byte) (void *), void *get_next_byte_argument, comma
       break;
 
     case SUBSHELL_COMMAND:
+    /* Look through until the matching end parentheses or EOF  is found */
       for (;;)
       {
         c = get_next_byte(get_next_byte_argument);
         if (c == EOF)
-          error (1,0, "%d: Mismatched Parentheses", *line_num);
+        {
+          error_message = "Mismatched parentheses";
+          token->status = 1;
+          free(buf);
+          return;
+        }
 
         else
         {
@@ -434,6 +476,15 @@ build_command(int (*get_next_byte) (void *), void *get_next_byte_argument, comma
           if (c == ')')
           {
             nesting_level--;
+
+            if (nesting_level < 0)
+            {
+              error_message = "Mismatched parentheses";
+              token->status = 1;
+              free(buf);
+              return;
+            }
+
             if (nesting_level == 0)
             {
               c = get_next_byte(get_next_byte_argument);
@@ -457,6 +508,14 @@ build_command(int (*get_next_byte) (void *), void *get_next_byte_argument, comma
       //Makes a recursive call to make_command_stream to generate the
       //command tree for the subshell
       FILE *subshell_stream = fmemopen(buf, buf_index, "r");
+      if (! subshell_stream)
+      {
+        error_message = "Unable to open stream";
+        token->status = 1;
+        free(buf);
+        return;
+      }
+
       subshell_tree = build_command_stream(get_next_byte, subshell_stream, 1);
       token->u.subshell_command = subshell_tree->commands[0];
       break;
@@ -482,7 +541,12 @@ build_command(int (*get_next_byte) (void *), void *get_next_byte_argument, comma
           output_chars++;
 
         if (input_chars > 1 || output_chars > 1)
-          error(1, 0, "%d: Invalid redirect", *line_num);
+        {
+          error_message = "Invalid redirect";
+          token->status = 1;
+          free(buf);
+          return;
+        }
 
         buf[buf_index] = c;
         buf_index++;
@@ -499,7 +563,12 @@ build_command(int (*get_next_byte) (void *), void *get_next_byte_argument, comma
       else if (c != ' ' && c != '\t')
       //Returns an error is there is a non-whitespace character 
       //that is not a redirect or valid word character.
-        error(1,0, "%d: Invalid Character", *line_num);
+      {
+        error_message = "Invalid character";
+        token->status = 1;
+        free(buf);
+        return;
+      }
 
       last_char = c;
       c = get_next_byte(get_next_byte_argument);
@@ -514,76 +583,126 @@ build_command(int (*get_next_byte) (void *), void *get_next_byte_argument, comma
     }
   }
 
+  //Sets the I/O redirects
   token->input = NULL;
   token->output = NULL;
 
-  if (buf_index == 2)
-    error (1, 0, "%d: Invalid redirect", *line_num);
+  in_pos = strchr(buf, '<');
+  out_pos = strchr(buf, '>');
 
-  else
+  if (in_pos && out_pos)
   {
-    in_pos = strchr(buf, '<');
-    out_pos = strchr(buf, '>');
+    if (out_pos < in_pos)
+      {
+        error_message = "Output must come after input";
+        token->status = 1;
+        free(buf);
+        return;
+      }
 
-    if (in_pos && out_pos)
+    buf2 = checked_malloc(buf2_size);
+    for (i = in_pos+1; i != out_pos; i++)
     {
-      if (out_pos < in_pos)
-        error(1,0, "%d: Output must come after input", *line_num);
-
-      buf2 = checked_malloc(buf2_size);
-      for (i = in_pos+1; i != out_pos; i++)
+      if (*i == '<')
       {
-        if (*i == '<')
-          error (1, 0, "Invalid Redirect", *line_num);
-
-        buf2[buf2_index] = *i;
-        buf2_index++;
-
-        if (buf2_index == buf2_size-1)
-        {
-          buf2_size *= 2;
-          size = buf2_size;
-          buf = (char*) checked_grow_alloc(buf, &size);
-          buf2_size = size;
-        }
+        error_message = "Invalid redirect";
+        token->status = 1;
+        free(buf);
+        free(buf2);
+        return;
       }
 
-      buf2[buf2_index] = '\0';
+      buf2[buf2_index] = *i;
+      buf2_index++;
 
-      token->input = buf2;
-
-      buf2_size = 25;
-      buf2_index = 0;
-      buf2 = checked_malloc(buf2_size);
-
-      for (i = out_pos+1; *i != '\0'; i++)
+      if (buf2_index == buf2_size-1)
       {
-        if (*i == '<' || *i)
-
-        buf2[buf2_index] = *i;
-        buf2_index++;
-
-        if (buf2_index == buf2_size-1)
-        {
-          buf2_size *= 2;
-          size = buf2_size;
-          buf = (char*) checked_grow_alloc(buf, &size);
-          buf2_size = size;
-        }
+        buf2_size *= 2;
+        size = buf2_size;
+        buf = (char*) checked_grow_alloc(buf, &size);
+        buf2_size = size;
       }
-
-      buf2[buf2_index] = '\0';
-      if (buf2[0] == '\0')
-        error(1,0, "%d: Redirect is missing argument", *line_num);
-
-      token ->output = buf2;
     }
 
+    buf2[buf2_index] = '\0';
+    if (buf2[0] == '\0')
+      {
+        error_message = "Invalid redirect";
+        token->status = 1;
+        free(buf);
+        free(buf2);
+        return;
+      }
 
-    else if (in_pos)
-      token->input = strtok(buf, "<");
+    token->input = buf2;
 
-    else if (out_pos)
-      token->output = strtok(buf, ">");
+    buf2_size = 25;
+    buf2_index = 0;
+    buf2 = checked_malloc(buf2_size);
+
+    for (i = out_pos+1; *i != '\0'; i++)
+    {
+      if (*i == '<' || *i == '>')
+      {
+        error_message = "Invalid redirect";
+        token->status = 1;
+        free(buf);
+        free(buf2);
+        return;
+      }
+
+      buf2[buf2_index] = *i;
+      buf2_index++;
+
+      if (buf2_index == buf2_size-1)
+      {
+        buf2_size *= 2;
+        size = buf2_size;
+        buf = (char*) checked_grow_alloc(buf, &size);
+        buf2_size = size;
+      }
+    }
+
+    buf2[buf2_index] = '\0';
+    if (buf2[0] == '\0')
+      {
+        error_message = "Invalid redirect";
+        token->status = 1;
+        free(buf);
+        free(buf2);
+        return;
+      }
+
+    token ->output = buf2;
+    free (buf);
   }
+
+
+  else if (in_pos)
+  {
+    token->input = strtok(buf, "<");
+    if (token->input == NULL)
+      {
+        error_message = "Invalid redirect";
+        token->status = 1;
+      }
+  }
+
+  else if (out_pos)
+  {
+    token->output = strtok(buf, ">");
+    if (token->output == NULL)
+      {
+        error_message = "Invalid redirect";
+        token->status = 1;
+      }
+    }
+}
+
+void error_func(command_stream_t stream, command_t current_command, char* message, int line)
+{
+  free_stream(stream);
+  free_tree(current_command);
+
+  error(1, 0, "%d: %s", line, message);
 }
