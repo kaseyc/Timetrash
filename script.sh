@@ -1,1 +1,1 @@
-cat script.sh >testfile | tr a-z A-Z  > temp.txt
+cat script.sh | tr a-z A-Z | tr A 1

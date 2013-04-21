@@ -361,6 +361,12 @@ get_next_command(int (*get_next_byte) (void *),
       break;
   }
 
+  //Initializes the I/O redirects to NULL
+  token->input = NULL;
+  token->output = NULL;
+  token->read_pipe = NULL;
+  token->write_pipe = NULL;
+
   if (token->type == SIMPLE_COMMAND || token->type == SUBSHELL_COMMAND)
     build_command(get_next_byte, get_next_byte_argument, token);
 
@@ -582,10 +588,6 @@ build_command(int (*get_next_byte) (void *), void *get_next_byte_argument, comma
       break;
     }
   }
-
-  //Sets the I/O redirects
-  token->input = NULL;
-  token->output = NULL;
 
   in_pos = strchr(buf, '<');
   out_pos = strchr(buf, '>');

@@ -14,9 +14,10 @@
 /* FIXME: You may need to add #include directives, macro definitions,
    static function definitions, etc.  */
 
-int run_command(command_t c);
-int build_pipe(command_t pipe_write, command_t pipe_read);
-void set_redirects(command_t c);
+pid_t run_command(command_t c);
+command_t find_command(command_t c, bool side);
+void set_IO(command_t c);
+pid_t execute (command_t c);
 
 int
 command_status (command_t c)
@@ -31,129 +32,168 @@ execute_command (command_t c, bool time_travel)
      add auxiliary functions and otherwise modify the source code.
      You can also use external functions defined in the GNU C Library.  */
 
-  run_command(c);
+     pid_t pid;
+     int status;
+     pid = run_command(c);
+     if (c->type == SIMPLE_COMMAND)
+     	waitpid(pid, &status, 0);
 }
 
-int
+pid_t
 run_command (command_t c)
 {
-	pid_t child;
+	pid_t pid, pid2;
 	int status;
+	int fd[2];
 
 	switch (c->type)
 	{
 		case SIMPLE_COMMAND:
-			child = fork();
-
-			if (child == 0)
-			{
-				set_redirects(c);
-				execvp(c->u.word[0], c->u.word);
-			}
-
-			else if (child < 0)
-				error(1, 0, "Failed to fork process");
-
-			else
-			{
-				waitpid(child, &status, 0);
-
-				if (WIFEXITED(status))
-					status = WEXITSTATUS(status);
-
-				else
-					error(1, 0, "Shell command exited with an error");
-			}
-
+			pid = execute(c);
 			break;
 
 		case SUBSHELL_COMMAND:
-			set_redirects(c);
-			status = run_command(c->u.subshell_command);
+			set_IO(c);
+			pid = run_command(c->u.subshell_command);
+			if (c->u.subshell_command->type == SIMPLE_COMMAND)
+			{
+				waitpid(pid, &status, 0);
+				c->u.subshell_command->status = WEXITSTATUS(status);
+			}
+
+			c->status = c->u.subshell_command->status;
 			break;
 
 		case AND_COMMAND:
-			status = run_command(c->u.command[0]);
+			pid = run_command(c->u.command[0]);
 
-			if (status == 0)
-				status = run_command(c->u.command[1]);
+			if (c->u.command[0]->type == SIMPLE_COMMAND)
+			{
+				waitpid(pid, &status, 0);
+				c->u.command[0]->status = WEXITSTATUS(status);
+			}
+
+			c->status = c->u.command[0]->status;
+
+			if (c->u.command[0]->status == 0)
+			{
+				pid = run_command(c->u.command[1]);
+
+				if (c->u.command[1]->type == SIMPLE_COMMAND)
+				{
+					waitpid(pid, &status, 0);
+					c->u.command[1]->status = WEXITSTATUS(status);
+				}
+				c->status = c->u.command[1]->status;
+			}
 			break;
 
 		case OR_COMMAND:
-			status = run_command(c->u.command[0]);
+			pid = run_command(c->u.command[0]);
+			if (c->u.command[0]->type == SIMPLE_COMMAND)
+			{
+				waitpid(pid, &status, 0);
+				c->u.command[0]->status = WEXITSTATUS(status);
+			}
 
-			if (status != 0)
-				status = run_command(c->u.command[1]);
+			c->status = c->u.command[0]->status;
+
+			if (c->u.command[0]->status != 0)
+			{
+				pid = run_command(c->u.command[1]);
+				if (c->u.command[0]->type == SIMPLE_COMMAND)
+				{
+					waitpid(pid, &status, 0);
+					c->u.command[1]->status = WEXITSTATUS(status);
+				}
+				c->status = c->u.command[1]->status;
+			}
 			break;
 
 		case PIPE_COMMAND:
-			build_pipe(c->u.command[0], c->u.command[1]);
+			if (pipe(fd) == -1)
+				error(1, errno, "Error creating pipe");
+
+			//Sets the pipe locations
+			if (c->u.command[0]->type == SIMPLE_COMMAND)
+				c->u.command[0]->write_pipe = fd;
+			else
+				find_command(c->u.command[0], 1)->write_pipe = fd;
+
+			if (c->u.command[1]->type == SIMPLE_COMMAND)
+				c->u.command[1]->read_pipe = fd;
+			else
+				find_command(c->u.command[1], 0)->read_pipe = fd;
+
+			pid = run_command(c->u.command[0]);
+			pid2 = run_command(c->u.command[1]);
+
+			close(fd[0]);
+			close(fd[1]);
+
+			waitpid(pid, &status, 0);
+			c->u.command[0]->status = WEXITSTATUS(status);
+
+			waitpid(pid2, &status, 0);
+			c->u.command[1]->status = WEXITSTATUS(status);
+			c->status = WEXITSTATUS(status);
+
 			break;
 
 		case SEQUENCE_COMMAND:
-			run_command(c->u.command[0]);
+			pid = run_command(c->u.command[0]);
+			if (c->u.command[0]->type == SIMPLE_COMMAND)
+			{
+				waitpid(pid, &status, 0);
+				c->u.command[0]->status = WEXITSTATUS(status);
+			}
+
+			pid = run_command(c->u.command[1]);
+			if (c->u.command[1]->type == SIMPLE_COMMAND)
+			{
+				waitpid(pid, &status, 0);
+				c->u.command[1]->status = WEXITSTATUS(status);
+			}
+
+			c->status = c->u.command[1]->status;
+
 			status = run_command(c->u.command[1]);
 			break;
 	}
 
-	return status;
+	return pid;
 }
 
-int build_pipe(command_t pipe_write, command_t pipe_read)
+command_t find_command(command_t c, bool side)
 {
-	int fd[2];
-	pid_t child, child2;
-	int status;
+	//Searches through the command tree looking for the lesftmost or rightmost command
+	//side == 0 means find the leftmost, side == 1 finds the rightmost
+	//Used for piping
+	command_t val;
 
-	if (pipe(fd) == -1)
-		error(1, errno, "Error opening pipe");
+	switch (c->type)
+	{
+		case AND_COMMAND:
+		case OR_COMMAND:
+		case SEQUENCE_COMMAND:
+		case PIPE_COMMAND:
+			val = find_command(c->u.command[side], side);
+			break;
 
-	//Set up the pipe writer
-	child = fork();
+		case SUBSHELL_COMMAND:
+			val = find_command(c->u.subshell_command, side);
+			break;
 
-	if (child < 0)
-		error (1, errno, "Error forking process");
+		default:
+			val = c;
+			break;
+	}
 
-	 else if (child == 0)
-	 {
-	 		if (!pipe_write->output)
-	 			dup2(fd[1], 1);
-	 		
-	 		set_redirects(pipe_write);
-
-	 		close(fd[0]);
-	 		close(fd[1]);
-	 		execvp(pipe_write->u.word[0], pipe_write->u.word);
-	 }
-
-	 //Set up pipe reader
-	 child2 = fork();
-
-	 if (child2 < 0)
-		error (1, errno, "Error forking process");
-
-	else if (child2 == 0)
-	 {
-	 		set_redirects(pipe_read);
-
-	 		if (!pipe_read->input)
-	 			dup2(fd[0], 0);
-
-	 		close(fd[0]);
-	 		close(fd[1]);
-	 		execvp(pipe_read->u.word[0], pipe_read->u.word);
-	 }
-
-	 close(fd[0]);
-	 close(fd[1]);
-
-	 waitpid(child, &status, 0);
-	 waitpid(child2, &status, 0);
-
-	 return (WEXITSTATUS(status));
+	return val;
 }
 
-void set_redirects(command_t c)
+void
+set_IO (command_t c)
 {
 	int fd_in, fd_out;
 	if (c->input)
@@ -165,6 +205,15 @@ void set_redirects(command_t c)
 		dup2(fd_in, 0);
 	}
 
+	if (c->read_pipe)
+	{
+		if (!c->input)
+			dup2(c->read_pipe[0], 0);
+
+		close(c->read_pipe[0]);
+		close(c->read_pipe[1]);
+	}
+
 	if (c->output)
 	{
 		fd_out = open(c->output, O_CREAT | O_TRUNC | O_WRONLY, 0644);
@@ -174,4 +223,32 @@ void set_redirects(command_t c)
 
 		dup2(fd_out, 1);
 	}
+
+	if (c->write_pipe)
+	{
+		if (!c->output)
+			dup2(c->write_pipe[1], 1);
+		
+		close(c->write_pipe[0]);
+		close(c->write_pipe[1]);
+	}
+}
+
+pid_t
+execute(command_t c)
+{
+	pid_t pid;
+
+	pid = fork();
+
+	if (pid == -1)
+		error(1, errno, "Error forking process");
+
+	if (pid == 0)
+	{
+		set_IO (c);
+		execvp(c->u.word[0], c->u.word);
+	}
+
+	return pid;
 }

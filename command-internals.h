@@ -23,6 +23,8 @@ struct command
   // I/O redirections, or null if none.
   char *input;
   char *output;
+  int  *read_pipe;
+  int  *write_pipe;
 
   union
   {
