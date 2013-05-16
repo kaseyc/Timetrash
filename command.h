@@ -22,10 +22,21 @@ command_t read_command_stream (command_stream_t stream);
 void print_command (command_t);
 
 /* Execute a command.  Use "time travel" if the flag is set.  */
-void execute_command (command_t, bool);
+void execute_command (command_t);
 
 /* Return the exit status of a command, which must have previously
    been executed.  Wait for the command, if it is not already finished.  */
 int command_status (command_t);
+
+//All below are declared in read-command.c
+
+/* Returns an array where each index holds the commands that the command with
+   that index depends on.
+   e.g. element 5 holds the id's of the commands command 5 must wait on */
+int** set_dependencies(command_t* commands, int num_commands);
+
+/* Returns true if no dependencies overlap.
+   Overlapping means writing to the same file, or reading from a file the other writes to*/
+bool check_dependencies(command_t c1, command_t c2);
 
 #endif

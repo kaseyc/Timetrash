@@ -708,3 +708,176 @@ void error_func(command_stream_t stream, command_t current_command, char* messag
 
   error(1, 0, "%d: %s", line, message);
 }
+
+//Defenitions of the depency commands for time-travel
+
+bool
+check_dependencies(command_t c1, command_t c2)
+{
+  bool status = true;
+  char** w;
+
+  switch (c1->type)
+  {
+    case AND_COMMAND:
+    case OR_COMMAND:
+    case SEQUENCE_COMMAND:
+    case PIPE_COMMAND:
+      status = check_dependencies(c1->u.command[0], c2);
+      if (status)
+        status = check_dependencies(c1->u.command[1], c2);
+      break;
+
+    case SUBSHELL_COMMAND:
+      switch (c2->type)
+      {
+        case AND_COMMAND:
+        case OR_COMMAND:
+        case SEQUENCE_COMMAND:
+        case PIPE_COMMAND:
+          status = check_dependencies(c1, c2->u.command[0]);
+          if (status)
+            status = check_dependencies(c1, c2->u.command[1]);
+          break;
+
+        case SUBSHELL_COMMAND:
+          if (c1->output && c2->output && (strcmp(c1->output, c2->output) == 0))
+            status = false;
+
+          else if (c1->output && c2->input && (strcmp(c1->output, c2->input) == 0))
+            status = false;
+
+          else if (c1->input && c2->output && (strcmp(c1->input, c2->output) == 0))
+            status = false;
+
+          if (status) 
+            status = check_dependencies(c1, c2->u.subshell_command);
+          break;
+
+        case SIMPLE_COMMAND:
+          if (c1->output && c2->output && (strcmp(c1->output, c2->output) == 0))
+            status = false;
+
+          else if (c1->output && c2->input && (strcmp(c1->output, c2->input) == 0))
+            status = false;
+
+          else if (c1->input && c2->output && (strcmp(c1->input, c2->output) == 0))
+            status = false;
+
+          if (status && c1->output)
+          {
+            w = c2->u.word;
+            while (*++w)
+            {
+              status = strcmp(*w, c2->output);
+              if (!status)
+                break;
+            }
+          }
+
+          break;   
+      }
+
+      if (status)
+        status = check_dependencies(c1->u.subshell_command, c2);
+
+      break;
+
+    case SIMPLE_COMMAND:
+      switch (c2->type)
+      {
+        case AND_COMMAND:
+        case OR_COMMAND:
+        case SEQUENCE_COMMAND:
+        case PIPE_COMMAND:
+          status = check_dependencies(c1, c2->u.command[0]);
+          if (status)
+            status = check_dependencies(c1, c2->u.command[1]);
+          break;
+
+        case SUBSHELL_COMMAND:
+          if (c1->output && c2->output && (strcmp(c1->output, c2->output) == 0))
+            status = false;
+
+          else if (c1->output && c2->input && (strcmp(c1->output, c2->input) == 0))
+            status = false;
+
+          else if (c1->input && c2->output && (strcmp(c1->input, c2->output) == 0))
+            status = false;
+
+          if (status) 
+            status = check_dependencies(c1, c2->u.subshell_command);
+          break;
+
+        case SIMPLE_COMMAND:
+          if (c1->output && c2->output && (strcmp(c1->output, c2->output) == 0))
+            status = false;
+
+          else if (c1->output && c2->input && (strcmp(c1->output, c2->input) == 0))
+            status = false;
+
+          else if (c1->input && c2->output && (strcmp(c1->input, c2->output) == 0))
+            status = false;
+
+          if (status && c1->output)
+          {
+            w = c1->u.word;
+            while (*++w)
+            {
+              status = strcmp(*w, c1->output);
+              if (!status)
+                break;
+            }
+          }
+
+          if (status && c2->output)
+          {
+            w = c2->u.word;
+            while (*++w)
+            {
+              status = strcmp(*w, c1->output);
+              if (!status)
+                break;
+            }
+          }
+
+          break;   
+      }
+      break;
+  }
+  return status;
+}
+
+int**
+set_dependencies(command_t *commands, int num_commands)
+{
+  int i, j, init_size = 4, index, curr_size;
+  size_t st_size;
+  int** depends_on = (int**) checked_malloc(num_commands * sizeof(int*));
+  for (i = 0; i < num_commands; i++)
+  {
+    curr_size = init_size;
+    index = 0;
+    depends_on[i] = (int*) checked_malloc(init_size*sizeof(int));
+
+    for (j = 0; j < i; j++)
+    {
+      if (!check_dependencies(commands[i], commands[j]))
+      {
+        depends_on[i][index] = j;
+        index++;
+
+        if (index == curr_size-1)
+        {
+          curr_size *= 2;
+          st_size = curr_size;
+          depends_on[i] = (int*) checked_grow_alloc(depends_on[i], &st_size);
+          curr_size = st_size;
+        }
+      }
+    }
+    depends_on[i][index] = -1;
+  }
+
+  return depends_on;
+}

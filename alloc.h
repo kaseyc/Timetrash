@@ -1,5 +1,6 @@
 // UCLA CS 111 Lab 1 storage allocation
 #include <stddef.h>
+#include <stdlib.h>
 #include "command.h"
 #include "command-internals.h"
 void *checked_malloc (size_t);

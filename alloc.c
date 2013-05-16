@@ -4,7 +4,6 @@
 
 #include <error.h>
 #include <errno.h>
-#include <stdlib.h>
 
 static void
 memory_exhausted (int errnum)
