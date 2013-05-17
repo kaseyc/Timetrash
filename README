@@ -1,0 +1,11 @@
+The timetravel shell for UCLA CS111 Lab 1
+
+Options:
+  -p: Print the comand tree
+  -t: Run in time travel mode
+
+This shell supports a subset of the normal shell, including pipes, logical operaors, subshells, and redirects. It does not handle loops or conditionals.
+
+Running in time travel mode will cause the program to attempt to parallelize the
+top level commands as much as it can. It assumes that files are not referred to by separate names, and that the only files read and written are those in the arguments. Additionally, it does not synchronize access to stdin and stdout, so
+reads and writes will be interleaved.
