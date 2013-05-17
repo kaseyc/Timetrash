@@ -2,3 +2,5 @@
 *.sh
 *.tar.gz
 timetrash
+*.geany
+lab1-kasey/
